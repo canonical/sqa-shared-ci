@@ -21,7 +21,7 @@ on:
       dry_run:
         description: Print the Test Observer payloads without submitting them
         type: boolean
-        default: true
+        default: false
       test_observer_environment:
         description: Test Observer environment to register the executions in
         type: choice
@@ -29,7 +29,7 @@ on:
           - none
           - staging
           - production
-        default: staging
+        default: production
 
 # Nothing in this workflow touches its own repository; all privilege comes from
 # the PAT passed to the action, not from GITHUB_TOKEN. `contents: read` is only
