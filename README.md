@@ -13,8 +13,13 @@ GitHub does not provide a simple built-in pattern for a public repository workfl
 - monitoring the run to completion
 - failing the caller job if the remote workflow fails
 - exposing the remote run ID, URL, and conclusion as outputs
+- collecting structured data the remote workflow returns, and exposing it as a JSON output
 
 ## Usage
+
+A complete, runnable end-to-end example lives in
+[`.github/workflows/example-submit-manifest.yaml`](.github/workflows/example-submit-manifest.yaml):
+it dispatches a private workflow, waits for it, and reads structured data back.
 
 ```yaml
 steps:
@@ -46,6 +51,9 @@ steps:
 | `target_ref` | No | Git ref to dispatch in the target repository. Defaults to `main`. |
 | `workflow_inputs_json` | No | JSON object string passed as `workflow_dispatch` inputs. Defaults to `{}`. |
 | `metadata` | No | Arbitrary JSON metadata to pass to the remote workflow. Merged with auto-collected caller context (see below). Defaults to `{}`. |
+| `collect_outputs` | No | Whether to collect structured data returned by the remote workflow. Defaults to `true`. |
+| `outputs_artifact` | No | Artifact name the remote workflow uploads its outputs JSON in. Defaults to `workflow-outputs`. |
+| `outputs_step_prefix` | No | Step-name prefix for the inline fallback channel. Defaults to `outputs::`. |
 
 ## Outputs
 
@@ -54,6 +62,8 @@ steps:
 | `run_id` | ID of the triggered remote workflow run. |
 | `run_url` | URL of the triggered remote workflow run. |
 | `conclusion` | Final conclusion reported by the remote workflow run. |
+| `remote_outputs` | JSON object of data returned by the remote workflow. `{}` when it returned none. |
+| `remote_outputs_source` | Where the data came from: `artifact`, `step`, or `none`. |
 
 Example output usage:
 
@@ -63,13 +73,18 @@ Example output usage:
 		echo "Remote run ID: ${{ steps.remote_executor.outputs.run_id }}"
 		echo "Remote run URL: ${{ steps.remote_executor.outputs.run_url }}"
 		echo "Conclusion: ${{ steps.remote_executor.outputs.conclusion }}"
+
+- name: Use data returned by the remote workflow
+	env:
+		ARTEFACT_URL: ${{ fromJSON(steps.remote_executor.outputs.remote_outputs).artefact_url }}
+	run: echo "Dashboard: ${ARTEFACT_URL}"
 ```
 
 ## Requirements
 
 - The target workflow must support `workflow_dispatch`.
-- The token supplied in `github_token` must be able to dispatch workflows and read workflow runs in the private target repository.
-- If you run this on self-hosted runners, Go must be available because the composite action executes two small Go programs with `go run`.
+- The token supplied in `github_token` must be able to dispatch workflows and read workflow runs in the private target repository. Collecting outputs additionally needs `actions: read` on that repository.
+- If you run this on self-hosted runners, Go must be available because the composite action executes small Go programs with `go run`.
 
 ## Behavior
 
@@ -80,7 +95,8 @@ At runtime the action:
 3. waits briefly for the run to register
 4. finds the newly created run ID
 5. polls the run until it completes
-6. returns outputs and fails if the remote conclusion is not `success`
+6. collects any data the remote workflow returned
+7. returns outputs and fails if the remote conclusion is not `success`
 
 The caller job will fail when the remote workflow finishes with any conclusion other than `success`.
 
@@ -89,6 +105,53 @@ The caller job will fail when the remote workflow finishes with any conclusion o
 - `target_workflow` can be either a workflow ID or a workflow filename such as `deploy.yml`.
 - `workflow_inputs_json` must be valid JSON.
 - For stable consumption, pin the action to a tag or commit SHA instead of a moving branch when you are ready to productionize it.
+
+## Returning Data From The Remote Workflow
+
+GitHub's REST API exposes neither job outputs nor step summaries for a dispatched run, so a remote workflow cannot simply declare `outputs:` and have the caller read them. Two channels actually cross the repository boundary, and the action reads both — artifact first, step name second.
+
+### Preferred: upload an artifact
+
+Have the target workflow write a JSON object and upload it under the name the caller passes as `outputs_artifact` (default `workflow-outputs`):
+
+```yaml
+- name: Publish workflow outputs
+  if: always()
+  run: |
+    jq -n --arg url "$ARTEFACT_URL" --argjson ids "$IDS" \
+      '{artefact_url: $url, test_execution_ids: $ids}' > outputs.json
+
+- uses: actions/upload-artifact@v7
+  with:
+    name: workflow-outputs
+    path: outputs.json
+```
+
+Arbitrary size, structured, and unaffected by UI changes. If the archive holds several JSON files, `outputs.json` wins; otherwise the first `.json` file is used.
+
+### Fallback: encode the payload in a step name
+
+When adding an upload step isn't practical, the target workflow can interpolate the payload into a **step name**, which the jobs API does return:
+
+```yaml
+- name: "outputs::{\"artefact_id\":${{ steps.submit.outputs.artefact_id }}}"
+  run: ':'
+```
+
+The prefix is configurable via `outputs_step_prefix`. The last matching step wins. This channel is length-limited and makes the step name machine-shaped, so prefer the artifact.
+
+### Consuming the result
+
+Either way the caller gets one JSON object:
+
+```yaml
+- name: Use the returned data
+  env:
+    OUTPUTS: ${{ steps.remote_executor.outputs.remote_outputs }}
+  run: echo "$OUTPUTS" | jq -r .artefact_url
+```
+
+Collection never fails the caller. If the remote workflow returned nothing, or the lookup itself errored, `remote_outputs` is `{}` and `remote_outputs_source` is `none` — the remote run's own conclusion still decides whether the job passes. Collection also runs when the remote workflow *failed*, so partial data such as a dashboard link is still available for triage.
 
 ## Metadata
 
