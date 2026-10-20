@@ -47,8 +47,8 @@ jobs:
       # operand, so a dispatch with dry_run=false would collapse back to the
       # default. Branching on event_name instead keeps an explicit `false`
       # intact while still giving pushes a default.
-      DRY_RUN: ${{ inputs.dry_run }}
-      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name != 'workflow_dispatch' && 'staging' || inputs.test_observer_environment }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      TEST_OBSERVER_ENVIRONMENT: ${{ inputs.test_observer_environment || 'production' }}
       # The manifest declares WHAT to test (metadata) and WITH WHICH VERSIONS
       # (versionsUnderTest). The target workflow validates it before doing
       # anything else, so a malformed manifest fails fast and loudly.
