@@ -10,6 +10,12 @@ name: Example - Submit Release Manifest
 # structured data back. Copy this file, swap the manifest, and you are done.
 
 on:
+  # Also runs on every push to the development branch so the executor is
+  # exercised end-to-end before it merges. Pushes have no dispatch inputs, so
+  # the job falls back to safe defaults below.
+  push:
+    branches:
+      - feat/remote-outputs
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,8 +32,10 @@ on:
         default: staging
 
 # Nothing in this workflow touches its own repository; all privilege comes from
-# the PAT passed to the action, not from GITHUB_TOKEN.
-permissions: {}
+# the PAT passed to the action, not from GITHUB_TOKEN. `contents: read` is only
+# here so the push-triggered run can check itself out.
+permissions:
+  contents: read
 
 jobs:
   submit-manifest:
@@ -35,6 +43,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # `x && y || z` is not a ternary in GitHub expressions - it yields the
+      # operand, so a dispatch with dry_run=false would collapse back to the
+      # default. Branching on event_name instead keeps an explicit `false`
+      # intact while still giving pushes a default.
+      DRY_RUN: ${{ github.event_name != 'workflow_dispatch' && 'true' || inputs.dry_run }}
+      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name != 'workflow_dispatch' && 'staging' || inputs.test_observer_environment }}
       # The manifest declares WHAT to test (metadata) and WITH WHICH VERSIONS
       # (versionsUnderTest). The target workflow validates it before doing
       # anything else, so a malformed manifest fails fast and loudly.
@@ -73,6 +87,13 @@ jobs:
         }
 
     steps:
+      # Needed only because this sample runs the action from the local
+      # checkout (see the `uses:` below).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # The composite action shells out to `go run`, so Go has to exist on the
       # runner. ubuntu-latest ships with it, but pinning a version keeps the
       # sample reproducible and makes the dependency obvious to anyone copying
@@ -84,7 +105,11 @@ jobs:
 
       - name: Submit the manifest
         id: submit_manifest
-        uses: canonical/sqa-shared-ci/.github/actions/remote_github_workflow_executor@main
+        # Local path, not `canonical/sqa-shared-ci/...@<ref>`: a push-triggered
+        # run has to test the action as it exists on *this* branch, and `uses:`
+        # cannot take an expression. Consumers should use the pinned remote
+        # form shown in the README instead.
+        uses: ./.github/actions/remote_github_workflow_executor
         with:
           # A PAT, not GITHUB_TOKEN: GITHUB_TOKEN is scoped to this repository
           # and cannot dispatch or read runs in the private target. The token
@@ -103,8 +128,8 @@ jobs:
           workflow_inputs_json: |
             {
               "manifest": ${{ toJSON(env.MANIFEST) }},
-              "dry-run": ${{ inputs.dry_run }},
-              "test_observer_environment": "${{ inputs.test_observer_environment }}"
+              "dry-run": ${{ env.DRY_RUN }},
+              "test_observer_environment": "${{ env.TEST_OBSERVER_ENVIRONMENT }}"
             }
 
           # Defaults, spelled out so the contract is visible. The target
