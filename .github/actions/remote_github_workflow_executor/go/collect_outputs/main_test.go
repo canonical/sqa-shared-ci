@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -311,6 +312,15 @@ func TestJSONFromZip_NoJSONFile(t *testing.T) {
 
 	if _, err := jsonFromZip(zipBytes); err == nil {
 		t.Error("expected an error when the artifact holds no .json file")
+	}
+}
+
+// TestCompactJSON_RejectsOversizedPayload pins that a payload over the step
+// output limit degrades to an error instead of failing the step later.
+func TestCompactJSON_RejectsOversizedPayload(t *testing.T) {
+	big := `{"blob":"` + strings.Repeat("x", maxOutputBytes) + `"}`
+	if _, err := compactJSON([]byte(big)); err == nil {
+		t.Error("expected an error for a payload over the output limit")
 	}
 }
 

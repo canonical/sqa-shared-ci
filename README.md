@@ -132,7 +132,7 @@ Both steps need `if: always()`: without it a failed job skips the upload, and th
 
 Structured and unaffected by UI changes. If the archive holds several JSON files, `outputs.json` wins; otherwise the first `.json` file is used.
 
-Outputs are capped at **10 MiB**, applied to both the downloaded archive and the JSON file inside it. Anything larger is truncated, fails to parse, and is treated like any other collection failure (`remote_outputs` falls back to the step-name channel, then `{}`). Outputs are for metadata such as IDs and links; upload bulk results as a separate artifact.
+The compacted JSON is capped at **1 MB**, GitHub's limit for a single step output (the downloaded archive is capped at 10 MiB). Anything larger is treated like any other collection failure (`remote_outputs` falls back to the step-name channel, then `{}`). Outputs are for metadata such as IDs and links; upload bulk results as a separate artifact.
 
 ### Fallback: encode the payload in a step name
 

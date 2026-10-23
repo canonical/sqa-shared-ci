@@ -34,6 +34,9 @@ var apiBaseURL = "https://api.github.com"
 // not payloads; anything larger is a misuse of the channel.
 const maxArtifactBytes = 10 << 20
 
+// maxOutputBytes is GitHub's 1 MB limit on a single step output.
+const maxOutputBytes = 1_000_000
+
 // maxPages bounds pagination so a looping Link header cannot hang the step.
 const maxPages = 50
 
@@ -267,6 +270,9 @@ var obj map[string]json.RawMessage
 	compacted, err := json.Marshal(obj)
 	if err != nil {
 		return "", fmt.Errorf("re-encoding outputs: %w", err)
+	}
+	if len(compacted) > maxOutputBytes {
+		return "", fmt.Errorf("outputs are %d bytes, over the %d-byte step output limit", len(compacted), maxOutputBytes)
 	}
 	return string(compacted), nil
 }

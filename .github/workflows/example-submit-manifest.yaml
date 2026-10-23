@@ -131,7 +131,7 @@ jobs:
           workflow_inputs_json: |
             {
               "manifest": ${{ toJSON(env.MANIFEST) }},
-              "dry-run": ${{ env.DRY_RUN }},
+              "dry-run": "${{ env.DRY_RUN }}",
               "test_observer_environment": "${{ env.TEST_OBSERVER_ENVIRONMENT }}"
             }
 

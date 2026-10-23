@@ -51,7 +51,9 @@ outputs:
     value: ${{ steps.return_status.outputs.conclusion }}
   remote_outputs:
     description: JSON object of data returned by the remote workflow; '{}' when it returned none
-    value: ${{ steps.return_status.outputs.remote_outputs }}
+    # Mapped straight from the collector: routing a payload this size through
+    # an env var can exceed the kernel's per-variable limit.
+    value: ${{ steps.collect_outputs.outputs.remote_outputs || '{}' }}
   remote_outputs_source:
     description: Where the outputs came from - artifact, step, or none
     value: ${{ steps.return_status.outputs.remote_outputs_source }}
@@ -224,7 +226,6 @@ runs:
         RUN_URL: ${{ steps.monitor_run.outputs.run_url }}
         CONCLUSION: ${{ steps.monitor_run.outputs.conclusion }}
         MONITOR_OUTCOME: ${{ steps.monitor_run.outcome }}
-        REMOTE_OUTPUTS: ${{ steps.collect_outputs.outputs.remote_outputs }}
         REMOTE_OUTPUTS_SOURCE: ${{ steps.collect_outputs.outputs.remote_outputs_source }}
       run: |
         set -euo pipefail
@@ -233,15 +234,6 @@ runs:
         echo "run_url=${RUN_URL}" >> "${GITHUB_OUTPUT}"
         echo "conclusion=${CONCLUSION}" >> "${GITHUB_OUTPUT}"
         echo "remote_outputs_source=${REMOTE_OUTPUTS_SOURCE:-none}" >> "${GITHUB_OUTPUT}"
-
-        # Heredoc form with a per-run delimiter: the payload is caller-supplied
-        # JSON, so it must never be able to terminate its own output block.
-        DELIMITER="REMOTE_OUTPUTS_$(date +%s)_${RANDOM}${RANDOM}"
-        {
-          echo "remote_outputs<<${DELIMITER}"
-          echo "${REMOTE_OUTPUTS:-{\}}"
-          echo "${DELIMITER}"
-        } >> "${GITHUB_OUTPUT}"
 
         if [ "${MONITOR_OUTCOME}" = "failure" ]; then
           echo "ERROR: Monitor step failed"

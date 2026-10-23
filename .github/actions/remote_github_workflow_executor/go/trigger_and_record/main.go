@@ -177,11 +177,11 @@ func isUnexpectedInputsError(body []byte) bool {
 	return strings.Contains(errResp.Message, "Unexpected inputs provided")
 }
 
-// findRunID guesses the run created by our dispatch: the earliest run created
-// after dispatchedAt. Concurrent dispatches can still make this ambiguous.
+// findRunID looks for the run created by our dispatch: the only run created at
+// or after dispatchedAt. It fails rather than guess when that is ambiguous.
 func findRunID(token, owner, repo, workflow string, dispatchedAt time.Time) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=20&created=%%3E%%3D%s",
-		owner, repo, workflow, dispatchedAt.Add(-10*time.Second).Format(time.RFC3339))
+		owner, repo, workflow, dispatchedAt.Format(time.RFC3339))
 
 	for attempt := 1; attempt <= 8; attempt++ {
 		fmt.Printf("INFO: [Find attempt %d/8] Fetching recent workflow runs...\n", attempt)
@@ -236,10 +236,9 @@ func findRunID(token, owner, repo, workflow string, dispatchedAt time.Time) (str
 
 		if n := len(result.WorkflowRuns); n > 0 {
 			if n > 1 {
-				fmt.Printf("WARN: %d runs created since dispatch; picking the earliest, which may not be ours\n", n)
+				return "", fmt.Errorf("%d runs created since dispatch; cannot tell which is ours", n)
 			}
-			// Runs are listed newest first.
-			return fmt.Sprintf("%d", result.WorkflowRuns[n-1].ID), nil
+			return fmt.Sprintf("%d", result.WorkflowRuns[0].ID), nil
 		}
 
 		if attempt < 8 {
