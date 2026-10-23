@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -30,35 +31,48 @@ func zipWith(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// fakeAPI stands in for the GitHub REST endpoints the collector touches.
+// fakeAPI stands in for the GitHub REST endpoints the collector touches. The
+// listings are paged: each element is one page, linked via rel="next".
 type fakeAPI struct {
-	artifacts string // JSON body for the run artifacts listing
-	zipBody   []byte // body for the artifact zip download
-	jobs      string // JSON body for the run jobs listing
+	artifacts []string // JSON bodies for the run artifacts listing
+	zipBody   []byte   // body for the artifact zip download
+	jobs      []string // JSON bodies for the run jobs listing
+}
+
+func servePages(pages []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if len(pages) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			page, _ = strconv.Atoi(p)
+		}
+		if page < len(pages) {
+			next := fmt.Sprintf("http://%s%s?per_page=100&page=%d", r.Host, r.URL.Path, page+1)
+			w.Header().Set("Link", fmt.Sprintf(`<%s>; rel="next", <%s>; rel="last"`, next, next))
+		}
+		fmt.Fprint(w, pages[page-1])
+	}
 }
 
 func (f *fakeAPI) start(t *testing.T) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/o/r/actions/runs/1/artifacts", func(w http.ResponseWriter, _ *http.Request) {
-		if f.artifacts == "" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		fmt.Fprint(w, f.artifacts)
-	})
+	mux.HandleFunc("/repos/o/r/actions/runs/1/artifacts", servePages(f.artifacts))
 	mux.HandleFunc("/repos/o/r/actions/artifacts/7/zip", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(f.zipBody)
 	})
-	mux.HandleFunc("/repos/o/r/actions/runs/1/jobs", func(w http.ResponseWriter, _ *http.Request) {
-		if f.jobs == "" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		fmt.Fprint(w, f.jobs)
-	})
+	mux.HandleFunc("/repos/o/r/actions/runs/1/jobs", servePages(f.jobs))
 
-	srv := httptest.NewServer(mux)
+	useServer(t, mux)
+}
+
+// useServer points the collector at handler for the duration of the test.
+func useServer(t *testing.T, handler http.Handler) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	original := apiBaseURL
@@ -74,9 +88,9 @@ func newCollector() *collector {
 // artifact and a marked step are present, the artifact wins.
 func TestCollect_PrefersArtifact(t *testing.T) {
 	api := &fakeAPI{
-		artifacts: `{"artifacts":[{"id":7,"name":"workflow-outputs","expired":false}]}`,
+		artifacts: []string{`{"artifacts":[{"id":7,"name":"workflow-outputs","expired":false}]}`},
 		zipBody:   zipWith(t, map[string]string{"outputs.json": `{"from":"artifact"}`}),
-		jobs:      `{"jobs":[{"name":"j","steps":[{"name":"outputs::{\"from\":\"step\"}"}]}]}`,
+		jobs:      []string{`{"jobs":[{"name":"j","steps":[{"name":"outputs::{\"from\":\"step\"}"}]}]}`},
 	}
 	api.start(t)
 
@@ -94,8 +108,8 @@ func TestCollect_PrefersArtifact(t *testing.T) {
 // without uploading an artifact.
 func TestCollect_FallsBackToStepName(t *testing.T) {
 	api := &fakeAPI{
-		artifacts: `{"artifacts":[]}`,
-		jobs:      `{"jobs":[{"name":"j","steps":[{"name":"Checkout"},{"name":"outputs::{\"artefact_id\":414047}"}]}]}`,
+		artifacts: []string{`{"artifacts":[]}`},
+		jobs:      []string{`{"jobs":[{"name":"j","steps":[{"name":"Checkout"},{"name":"outputs::{\"artefact_id\":414047}"}]}]}`},
 	}
 	api.start(t)
 
@@ -113,8 +127,8 @@ func TestCollect_FallsBackToStepName(t *testing.T) {
 // normal, non-failing outcome.
 func TestCollect_NoOutputs(t *testing.T) {
 	api := &fakeAPI{
-		artifacts: `{"artifacts":[]}`,
-		jobs:      `{"jobs":[{"name":"j","steps":[{"name":"Checkout"}]}]}`,
+		artifacts: []string{`{"artifacts":[]}`},
+		jobs:      []string{`{"jobs":[{"name":"j","steps":[{"name":"Checkout"}]}]}`},
 	}
 	api.start(t)
 
@@ -145,8 +159,8 @@ func TestCollect_APIErrorsDoNotMaskTheRun(t *testing.T) {
 // non-object JSON is not passed through to callers as if it were valid.
 func TestCollect_MalformedPayloadIsRejected(t *testing.T) {
 	api := &fakeAPI{
-		artifacts: `{"artifacts":[]}`,
-		jobs:      `{"jobs":[{"name":"j","steps":[{"name":"outputs::not json"}]}]}`,
+		artifacts: []string{`{"artifacts":[]}`},
+		jobs:      []string{`{"jobs":[{"name":"j","steps":[{"name":"outputs::not json"}]}]}`},
 	}
 	api.start(t)
 
@@ -154,6 +168,124 @@ func TestCollect_MalformedPayloadIsRejected(t *testing.T) {
 
 	if source != "none" {
 		t.Errorf("expected malformed payload to yield source=none, got %q", source)
+	}
+}
+
+// TestCollect_NullPayloadIsRejected pins that JSON null, which unmarshals into
+// a map without error, is not passed through as a valid object.
+func TestCollect_NullPayloadIsRejected(t *testing.T) {
+	api := &fakeAPI{
+		artifacts: []string{`{"artifacts":[{"id":7,"name":"workflow-outputs","expired":false}]}`},
+		zipBody:   zipWith(t, map[string]string{"outputs.json": `null`}),
+		jobs:      []string{`{"jobs":[{"name":"j","steps":[{"name":"outputs::null"}]}]}`},
+	}
+	api.start(t)
+
+	outputs, source := newCollector().collect("o", "r", "1", "workflow-outputs", "outputs::")
+
+	if source != "none" || outputs != "{}" {
+		t.Errorf("expected null payloads to yield {} from source=none, got %s from %q", outputs, source)
+	}
+}
+
+// TestCollect_FollowsArtifactPagination covers runs with more than one page of
+// artifacts, where the outputs artifact is not on the first page.
+func TestCollect_FollowsArtifactPagination(t *testing.T) {
+	api := &fakeAPI{
+		artifacts: []string{
+			`{"artifacts":[{"id":1,"name":"logs","expired":false}]}`,
+			`{"artifacts":[{"id":7,"name":"workflow-outputs","expired":false}]}`,
+		},
+		zipBody: zipWith(t, map[string]string{"outputs.json": `{"page":2}`}),
+	}
+	api.start(t)
+
+	outputs, source := newCollector().collect("o", "r", "1", "workflow-outputs", "")
+
+	if source != "artifact" || outputs != `{"page":2}` {
+		t.Errorf("expected artifact from page 2, got %s from %q", outputs, source)
+	}
+}
+
+// TestCollect_FollowsJobsPagination covers runs with more than one page of
+// jobs, where the marked step is not on the first page.
+func TestCollect_FollowsJobsPagination(t *testing.T) {
+	api := &fakeAPI{
+		artifacts: []string{`{"artifacts":[]}`},
+		jobs: []string{
+			`{"jobs":[{"name":"a","steps":[{"name":"Checkout"}]}]}`,
+			`{"jobs":[{"name":"b","steps":[{"name":"outputs::{\"page\":2}"}]}]}`,
+		},
+	}
+	api.start(t)
+
+	outputs, source := newCollector().collect("o", "r", "1", "workflow-outputs", "outputs::")
+
+	if source != "step" || outputs != `{"page":2}` {
+		t.Errorf("expected step payload from page 2, got %s from %q", outputs, source)
+	}
+}
+
+// TestCollect_SkipsExpiredArtifact pins that an expired artifact does not hide
+// a live one with the same name further down the listing.
+func TestCollect_SkipsExpiredArtifact(t *testing.T) {
+	api := &fakeAPI{
+		artifacts: []string{
+			`{"artifacts":[{"id":3,"name":"workflow-outputs","expired":true}]}`,
+			`{"artifacts":[{"id":7,"name":"workflow-outputs","expired":false}]}`,
+		},
+		zipBody: zipWith(t, map[string]string{"outputs.json": `{"live":true}`}),
+	}
+	api.start(t)
+
+	outputs, source := newCollector().collect("o", "r", "1", "workflow-outputs", "")
+
+	if source != "artifact" || outputs != `{"live":true}` {
+		t.Errorf("expected the live artifact, got %s from %q", outputs, source)
+	}
+}
+
+// TestFromArtifact_OnlyExpired pins that a run whose only match has expired
+// reports that, rather than claiming the artifact is absent.
+func TestFromArtifact_OnlyExpired(t *testing.T) {
+	api := &fakeAPI{
+		artifacts: []string{`{"artifacts":[{"id":3,"name":"workflow-outputs","expired":true}]}`},
+	}
+	api.start(t)
+
+	if _, err := newCollector().fromArtifact("o", "r", "1", "workflow-outputs"); err == nil {
+		t.Error("expected an error for an expired artifact")
+	}
+}
+
+// TestGetPage_RefusesOffHostLink pins that the token is never sent to a
+// pagination link pointing away from the API host.
+func TestGetPage_RefusesOffHostLink(t *testing.T) {
+	useServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Link", `<https://evil.example/steal?page=2>; rel="next"`)
+		fmt.Fprint(w, `{"artifacts":[]}`)
+	}))
+
+	if _, err := newCollector().fromArtifact("o", "r", "1", "workflow-outputs"); err == nil {
+		t.Error("expected an off-host pagination link to be refused")
+	}
+}
+
+// TestFromStepName_StopsAtPageCap pins that a self-referencing Link header
+// cannot loop forever.
+func TestFromStepName_StopsAtPageCap(t *testing.T) {
+	requests := 0
+	useServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?page=1>; rel="next"`, r.Host, r.URL.Path))
+		fmt.Fprint(w, `{"jobs":[]}`)
+	}))
+
+	if _, err := newCollector().fromStepName("o", "r", "1", "outputs::"); err == nil {
+		t.Error("expected an error once the page cap is reached")
+	}
+	if requests != maxPages {
+		t.Errorf("expected %d requests, got %d", maxPages, requests)
 	}
 }
 

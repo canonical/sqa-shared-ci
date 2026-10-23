@@ -160,14 +160,11 @@ jobs:
           ARTEFACT_URL: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_url }}
           ARTEFACT_ID: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_id }}
           EXECUTION_COUNT: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).test_execution_count }}
-          # The raw object, for anything not broken out above.
-          REMOTE_OUTPUTS: ${{ steps.submit_manifest.outputs.remote_outputs }}
         run: |
           set -euo pipefail
 
           echo "Remote run:      ${REMOTE_RUN_URL}"
           echo "Outputs source:  ${OUTPUTS_SOURCE}"
-          echo "Raw outputs:     ${REMOTE_OUTPUTS}"
 
           # `none` means the remote workflow returned nothing - either it had
           # nothing to report, or it predates the outputs contract. Treat it as

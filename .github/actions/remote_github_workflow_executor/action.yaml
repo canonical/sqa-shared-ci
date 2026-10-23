@@ -156,6 +156,8 @@ runs:
     - name: Collect remote outputs
       id: collect_outputs
       if: always() && inputs.collect_outputs == 'true' && steps.trigger_and_record.outputs.run_id != ''
+      # Collection must never fail the caller; return_status decides from the remote conclusion.
+      continue-on-error: true
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -185,7 +187,6 @@ runs:
         RUN_ID: ${{ steps.trigger_and_record.outputs.run_id }}
         RUN_URL: ${{ steps.monitor_run.outputs.run_url }}
         CONCLUSION: ${{ steps.monitor_run.outputs.conclusion }}
-        REMOTE_OUTPUTS: ${{ steps.collect_outputs.outputs.remote_outputs }}
         REMOTE_OUTPUTS_SOURCE: ${{ steps.collect_outputs.outputs.remote_outputs_source }}
       run: |
         cat << EOF
@@ -207,7 +208,6 @@ runs:
 
         REMOTE OUTPUTS:
           Source: ${REMOTE_OUTPUTS_SOURCE:-not collected}
-          Data: ${REMOTE_OUTPUTS}
 
         COMPLETION TIMESTAMP:
           $(date -u '+%Y-%m-%d %H:%M:%S UTC')
