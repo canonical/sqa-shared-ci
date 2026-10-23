@@ -257,7 +257,7 @@ func (c *collector) fromStepName(owner, repo, runID, prefix string) (string, err
 // compactJSON validates the payload is a JSON object and flattens it to one
 // line, which is what GITHUB_OUTPUT and downstream fromJSON() expect.
 func compactJSON(raw []byte) (string, error) {
-	var obj map[string]any
+var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return "", fmt.Errorf("outputs are not a JSON object: %w", err)
 	}
