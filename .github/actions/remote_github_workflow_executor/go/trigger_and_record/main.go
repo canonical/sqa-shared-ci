@@ -36,21 +36,27 @@ func main() {
 	fmt.Printf("INFO:   Workflow: %s\n", *workflow)
 	fmt.Printf("INFO:   Ref: %s\n", *ref)
 
-	// Dispatch the workflow
-	if err := dispatchWorkflow(token, *owner, *repo, *workflow, *ref, *inputsJSON); err != nil {
+	dispatchedAt := time.Now().UTC()
+	dispatchedID, err := dispatchWorkflow(token, *owner, *repo, *workflow, *ref, *inputsJSON)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error dispatching workflow: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Wait for run to be registered
-	fmt.Printf("INFO: Waiting 5s for run to be registered...\n")
-	time.Sleep(5 * time.Second)
+	var runID string
+	if dispatchedID > 0 {
+		runID = fmt.Sprintf("%d", dispatchedID)
+	} else {
+		// Only reached when the API ignored return_run_details (e.g. older GHES).
+		fmt.Printf("WARN: Dispatch response carried no run ID; falling back to run lookup\n")
+		fmt.Printf("INFO: Waiting 5s for run to be registered...\n")
+		time.Sleep(5 * time.Second)
 
-	// Find the run ID
-	runID, err := findRunID(token, *owner, *repo, *workflow)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding run ID: %v\n", err)
-		os.Exit(1)
+		runID, err = findRunID(token, *owner, *repo, *workflow, dispatchedAt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error finding run ID: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Printf("INFO: Writing run_id=%s to GITHUB_OUTPUT\n", runID)
@@ -63,27 +69,29 @@ func main() {
 	fmt.Printf("OK: Found workflow run: %s\n", runID)
 }
 
-func dispatchWorkflow(token, owner, repo, workflow, ref, inputsJSON string) error {
+// dispatchWorkflow returns the created run's ID, or 0 when the API did not report it.
+func dispatchWorkflow(token, owner, repo, workflow, ref, inputsJSON string) (int64, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/dispatches",
 		owner, repo, workflow)
 
 	// Parse inputs JSON
 	var inputs map[string]interface{}
 	if err := json.Unmarshal([]byte(inputsJSON), &inputs); err != nil {
-		return fmt.Errorf("invalid inputs JSON: %w", err)
+		return 0, fmt.Errorf("invalid inputs JSON: %w", err)
 	}
 
 	return doDispatch(token, url, ref, inputs)
 }
 
-func doDispatch(token, url, ref string, inputs map[string]interface{}) error {
+func doDispatch(token, url, ref string, inputs map[string]interface{}) (int64, error) {
 	body := map[string]interface{}{
-		"ref":    ref,
-		"inputs": inputs,
+		"ref":                ref,
+		"inputs":             inputs,
+		"return_run_details": true,
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	for attempt := 1; attempt <= 5; attempt++ {
@@ -91,7 +99,7 @@ func doDispatch(token, url, ref string, inputs map[string]interface{}) error {
 
 		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
@@ -107,18 +115,30 @@ func doDispatch(token, url, ref string, inputs map[string]interface{}) error {
 				time.Sleep(delay)
 				continue
 			}
-			return err
+			return 0, err
 		}
 
 		if resp.StatusCode == 204 {
 			resp.Body.Close()
 			fmt.Printf("INFO: Dispatch successful (HTTP 204)\n")
 			fmt.Println("OK: Workflow dispatch triggered successfully")
-			return nil
+			return 0, nil
 		}
 
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			var details struct {
+				WorkflowRunID int64 `json:"workflow_run_id"`
+			}
+			if err := json.Unmarshal(respBody, &details); err != nil {
+				fmt.Printf("WARN: Could not parse dispatch response: %v\n", err)
+			}
+			fmt.Printf("INFO: Dispatch successful (HTTP 200, run %d)\n", details.WorkflowRunID)
+			fmt.Println("OK: Workflow dispatch triggered successfully")
+			return details.WorkflowRunID, nil
+		}
 
 		// If 422 due to unexpected "metadata" input, strip it and retry without
 		if resp.StatusCode == 422 && inputs["metadata"] != nil {
@@ -130,7 +150,7 @@ func doDispatch(token, url, ref string, inputs map[string]interface{}) error {
 		}
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 {
-			return fmt.Errorf("non-retriable dispatch error (HTTP %d): %s", resp.StatusCode, string(respBody))
+			return 0, fmt.Errorf("non-retriable dispatch error (HTTP %d): %s", resp.StatusCode, string(respBody))
 		}
 
 		if attempt < 5 {
@@ -140,10 +160,10 @@ func doDispatch(token, url, ref string, inputs map[string]interface{}) error {
 			continue
 		}
 
-		return fmt.Errorf("dispatch failed after 5 attempts: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return 0, fmt.Errorf("dispatch failed after 5 attempts: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	return 0, nil
 }
 
 // isUnexpectedInputsError checks if a 422 response is about unexpected workflow inputs.
@@ -157,9 +177,11 @@ func isUnexpectedInputsError(body []byte) bool {
 	return strings.Contains(errResp.Message, "Unexpected inputs provided")
 }
 
-func findRunID(token, owner, repo, workflow string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=5",
-		owner, repo, workflow)
+// findRunID guesses the run created by our dispatch: the earliest run created
+// after dispatchedAt. Concurrent dispatches can still make this ambiguous.
+func findRunID(token, owner, repo, workflow string, dispatchedAt time.Time) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=20&created=%%3E%%3D%s",
+		owner, repo, workflow, dispatchedAt.Add(-10*time.Second).Format(time.RFC3339))
 
 	for attempt := 1; attempt <= 8; attempt++ {
 		fmt.Printf("INFO: [Find attempt %d/8] Fetching recent workflow runs...\n", attempt)
@@ -212,8 +234,12 @@ func findRunID(token, owner, repo, workflow string) (string, error) {
 			return "", err
 		}
 
-		if len(result.WorkflowRuns) > 0 {
-			return fmt.Sprintf("%d", result.WorkflowRuns[0].ID), nil
+		if n := len(result.WorkflowRuns); n > 0 {
+			if n > 1 {
+				fmt.Printf("WARN: %d runs created since dispatch; picking the earliest, which may not be ours\n", n)
+			}
+			// Runs are listed newest first.
+			return fmt.Sprintf("%d", result.WorkflowRuns[n-1].ID), nil
 		}
 
 		if attempt < 8 {

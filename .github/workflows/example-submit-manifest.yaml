@@ -11,8 +11,8 @@ name: Example - Submit Release Manifest
 
 on:
   # Also runs on every push to the development branch so the executor is
-  # exercised end-to-end before it merges. Pushes have no dispatch inputs, so
-  # the job falls back to safe defaults below.
+  # exercised end-to-end before it merges. Pushes are always a dry run with no
+  # Test Observer environment, so they never register real executions.
   push:
     branches:
       - feat/remote-outputs
@@ -21,7 +21,7 @@ on:
       dry_run:
         description: Print the Test Observer payloads without submitting them
         type: boolean
-        default: false
+        default: true
       test_observer_environment:
         description: Test Observer environment to register the executions in
         type: choice
@@ -29,7 +29,7 @@ on:
           - none
           - staging
           - production
-        default: production
+        default: none
 
 # Nothing in this workflow touches its own repository; all privilege comes from
 # the PAT passed to the action, not from GITHUB_TOKEN. `contents: read` is only
@@ -43,12 +43,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # `x && y || z` is not a ternary in GitHub expressions - it yields the
-      # operand, so a dispatch with dry_run=false would collapse back to the
-      # default. Branching on event_name instead keeps an explicit `false`
-      # intact while still giving pushes a default.
-      DRY_RUN: ${{ inputs.dry_run || 'false' }}
-      TEST_OBSERVER_ENVIRONMENT: ${{ inputs.test_observer_environment || 'production' }}
+      # Pushes have no inputs; force them to a dry run against no environment.
+      DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run }}
+      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name == 'push' && 'none' || inputs.test_observer_environment }}
       # The manifest declares WHAT to test (metadata) and WITH WHICH VERSIONS
       # (versionsUnderTest). The target workflow validates it before doing
       # anything else, so a malformed manifest fails fast and loudly.
