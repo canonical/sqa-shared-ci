@@ -1,0 +1,195 @@
+name: Example - Submit Release Manifest
+
+# End-to-end sample for consumers of the Remote GitHub Workflow Executor.
+#
+# It dispatches `submit-manifest.yaml` in the *private*
+# canonical/terragrunt-deployment-pipelines repository, waits for it to finish,
+# and reads the Test Observer artefact link back out of the remote run.
+#
+# This is the shape every consumer needs: public caller -> private worker ->
+# structured data back. Copy this file, swap the manifest, and you are done.
+
+on:
+  # Also runs on every push to the development branch so the executor is
+  # exercised end-to-end before it merges. Pushes are always a dry run with no
+  # Test Observer environment, so they never register real executions.
+  push:
+    branches:
+      - feat/remote-outputs
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the Test Observer payloads without submitting them
+        type: boolean
+        default: true
+      test_observer_environment:
+        description: Test Observer environment to register the executions in
+        type: choice
+        options:
+          - none
+          - staging
+          - production
+        default: none
+
+# Nothing in this workflow touches its own repository; all privilege comes from
+# the PAT passed to the action, not from GITHUB_TOKEN. `contents: read` is only
+# here so the push-triggered run can check itself out.
+permissions:
+  contents: read
+
+jobs:
+  submit-manifest:
+    name: Submit a release manifest and read back the result
+    runs-on: ubuntu-latest
+
+    env:
+      # Pushes have no inputs; force them to a dry run against no environment.
+      DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run }}
+      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name == 'push' && 'none' || inputs.test_observer_environment }}
+      # The manifest declares WHAT to test (metadata) and WITH WHICH VERSIONS
+      # (versionsUnderTest). The target workflow validates it before doing
+      # anything else, so a malformed manifest fails fast and loudly.
+      #
+      # Schema (source of truth): scripts/policy/manifest.go in
+      # canonical/terragrunt-deployment-pipelines -
+      # https://github.com/canonical/terragrunt-deployment-pipelines/blob/main/scripts/policy/manifest.go
+      # Narrative docs:
+      # https://canonical-terragrunt-deployment-pipelines.readthedocs-hosted.com/en/latest/explanation/architecture-manifest-to-test-observer/
+      #
+      # metadata.family selects the validator: "product" expects each entry in
+      # versionsUnderTest to carry a `ref` plus a `revisions` map, which is why
+      # landscape-server is nested one level deeper than a bare charm manifest.
+      MANIFEST: |
+        {
+          "metadata": {
+            "arch": "amd64",
+            "apiVersion": "v0",
+            "base": "ubuntu@24.04",
+            "product": "landscape",
+            "risk": "candidate",
+            "track": "latest",
+            "family": "product",
+            "terragruntRef": "main"
+          },
+          "versionsUnderTest": {
+            "landscape": {
+              "ref": "main",
+              "revisions": {
+                "landscape-server": {
+                  "revision": 231
+                }
+              }
+            }
+          }
+        }
+
+    steps:
+      # Needed only because this sample runs the action from the local
+      # checkout (see the `uses:` below).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The composite action shells out to `go run`, so Go has to exist on the
+      # runner. ubuntu-latest ships with it, but pinning a version keeps the
+      # sample reproducible and makes the dependency obvious to anyone copying
+      # this file onto a self-hosted runner where it may be absent.
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24'
+
+      - name: Submit the manifest
+        id: submit_manifest
+        # Local path, not `canonical/sqa-shared-ci/...@<ref>`: a push-triggered
+        # run has to test the action as it exists on *this* branch, and `uses:`
+        # cannot take an expression. Consumers should use the pinned remote
+        # form shown in the README instead.
+        uses: ./.github/actions/remote_github_workflow_executor
+        with:
+          # A PAT, not GITHUB_TOKEN: GITHUB_TOKEN is scoped to this repository
+          # and cannot dispatch or read runs in the private target. The token
+          # needs `actions: read` as well as dispatch, because collecting the
+          # remote outputs reads the target run's artifacts.
+          github_token: ${{ secrets.GH_TOKEN }}
+          target_repo_owner: canonical
+          target_repo_name: terragrunt-deployment-pipelines
+          target_workflow: submit-manifest.yaml
+          # Points at the branch of canonical/terragrunt-deployment-pipelines#281
+          # until it merges: the outputs.json artifact this sample reads back
+          # only exists there, so dispatching main would yield no outputs.
+          # Resolving the workflow by filename still goes through the default
+          # branch, so submit-manifest.yaml must exist on main either way.
+          # TODO: revert to `main` once #281 lands.
+          target_ref: return-id-on-manifest-submission
+
+          # workflow_dispatch inputs are strings on the wire, so the manifest
+          # travels as a JSON-encoded string. toJSON() does the quoting and
+          # escaping, which is the whole reason not to hand-roll it: the
+          # manifest is itself JSON and would otherwise need double escaping.
+          workflow_inputs_json: |
+            {
+              "manifest": ${{ toJSON(env.MANIFEST) }},
+              "dry-run": "${{ env.DRY_RUN }}",
+              "test_observer_environment": "${{ env.TEST_OBSERVER_ENVIRONMENT }}"
+            }
+
+          # Defaults, spelled out so the contract is visible. The target
+          # workflow uploads an artifact named `workflow-outputs` containing
+          # outputs.json; the action downloads it and hands it back as one JSON
+          # object. Without this there is no way to get data out: GitHub's REST
+          # API exposes neither job outputs nor step summaries of a dispatched
+          # run.
+          collect_outputs: 'true'
+          outputs_artifact: workflow-outputs
+
+      # Runs even on failure: a failed submission still publishes whatever it
+      # managed to register, and the Test Observer link is what you need to
+      # triage it.
+      - name: Use the data returned by the remote workflow
+        if: always()
+        env:
+          REMOTE_RUN_URL: ${{ steps.submit_manifest.outputs.run_url }}
+          OUTPUTS_SOURCE: ${{ steps.submit_manifest.outputs.remote_outputs_source }}
+          # fromJSON() turns the returned object into something addressable, so
+          # downstream steps consume named fields rather than grepping logs.
+          ARTEFACT_URL: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_url }}
+          ARTEFACT_ID: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_id }}
+          EXECUTION_COUNT: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).test_execution_count }}
+        run: |
+          set -euo pipefail
+
+          echo "Remote run:      ${REMOTE_RUN_URL}"
+          echo "Outputs source:  ${OUTPUTS_SOURCE}"
+
+          # `none` means the remote workflow returned nothing - either it had
+          # nothing to report, or it predates the outputs contract. Treat it as
+          # a soft signal, not a failure.
+          if [ "${OUTPUTS_SOURCE}" = "none" ]; then
+            echo "::warning::Remote workflow returned no structured outputs"
+            exit 0
+          fi
+
+          # A dry run plans executions without registering them, so the
+          # artefact fields come back empty. The outputs contract still worked;
+          # there is just nothing to link to yet.
+          if [ -z "${ARTEFACT_URL}" ]; then
+            echo "No artefact registered (dry run, or nothing was pending)."
+            {
+              echo "## Submitted to Test Observer"
+              echo ""
+              echo "Dry run - no artefact registered."
+              echo ""
+              echo "- [Remote workflow run](${REMOTE_RUN_URL})"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "## Submitted to Test Observer"
+            echo ""
+            echo "- Artefact: [${ARTEFACT_ID}](${ARTEFACT_URL})"
+            echo "- Test executions registered: ${EXECUTION_COUNT}"
+            echo "- [Remote workflow run](${REMOTE_RUN_URL})"
+          } >> "$GITHUB_STEP_SUMMARY"
