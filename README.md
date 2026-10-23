@@ -122,12 +122,17 @@ Have the target workflow write a JSON object and upload it under the name the ca
       '{artefact_url: $url, test_execution_ids: $ids}' > outputs.json
 
 - uses: actions/upload-artifact@v7
+  if: always()
   with:
     name: workflow-outputs
     path: outputs.json
 ```
 
-Arbitrary size, structured, and unaffected by UI changes. If the archive holds several JSON files, `outputs.json` wins; otherwise the first `.json` file is used.
+Both steps need `if: always()`: without it a failed job skips the upload, and the caller gets no data to triage the failure with.
+
+Structured and unaffected by UI changes. If the archive holds several JSON files, `outputs.json` wins; otherwise the first `.json` file is used.
+
+Outputs are capped at **10 MiB**, applied to both the downloaded archive and the JSON file inside it. Anything larger is truncated, fails to parse, and is treated like any other collection failure (`remote_outputs` falls back to the step-name channel, then `{}`). Outputs are for metadata such as IDs and links; upload bulk results as a separate artifact.
 
 ### Fallback: encode the payload in a step name
 
