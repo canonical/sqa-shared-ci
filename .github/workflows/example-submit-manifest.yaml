@@ -11,8 +11,8 @@ name: Example - Submit Release Manifest
 
 on:
   # Also runs on every push to the development branch so the executor is
-  # exercised end-to-end before it merges. Pushes are always a dry run with no
-  # Test Observer environment, so they never register real executions.
+  # exercised end-to-end before it merges. Pushes submit real executions to
+  # production Test Observer, as do manual runs unless overridden.
   push:
     branches:
       - feat/remote-outputs
@@ -21,7 +21,7 @@ on:
       dry_run:
         description: Print the Test Observer payloads without submitting them
         type: boolean
-        default: true
+        default: false
       test_observer_environment:
         description: Test Observer environment to register the executions in
         type: choice
@@ -29,7 +29,7 @@ on:
           - none
           - staging
           - production
-        default: none
+        default: production
 
 # Nothing in this workflow touches its own repository; all privilege comes from
 # the PAT passed to the action, not from GITHUB_TOKEN. `contents: read` is only
@@ -43,9 +43,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Pushes have no inputs; force them to a dry run against no environment.
-      DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run }}
-      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name == 'push' && 'none' || inputs.test_observer_environment }}
+      # Pushes have no inputs; submit to production unless manually overridden.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+      TEST_OBSERVER_ENVIRONMENT: ${{ github.event_name == 'push' && 'production' || inputs.test_observer_environment }}
       # The manifest declares WHAT to test (metadata) and WITH WHICH VERSIONS
       # (versionsUnderTest). The target workflow validates it before doing
       # anything else, so a malformed manifest fails fast and loudly.
@@ -154,9 +154,9 @@ jobs:
           OUTPUTS_SOURCE: ${{ steps.submit_manifest.outputs.remote_outputs_source }}
           # fromJSON() turns the returned object into something addressable, so
           # downstream steps consume named fields rather than grepping logs.
-          ARTEFACT_URL: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_url }}
-          ARTEFACT_ID: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).artefact_id }}
-          EXECUTION_COUNT: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs).test_execution_count }}
+          ARTEFACT_URL: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs || '{}').artefact_url }}
+          ARTEFACT_ID: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs || '{}').artefact_id }}
+          EXECUTION_COUNT: ${{ fromJSON(steps.submit_manifest.outputs.remote_outputs || '{}').test_execution_count }}
         run: |
           set -euo pipefail
 
@@ -171,15 +171,14 @@ jobs:
             exit 0
           fi
 
-          # A dry run plans executions without registering them, so the
-          # artefact fields come back empty. The outputs contract still worked;
-          # there is just nothing to link to yet.
+          # An explicit dry run, environment `none`, or nothing pending can
+          # leave artefact fields empty even when the outputs contract worked.
           if [ -z "${ARTEFACT_URL}" ]; then
-            echo "No artefact registered (dry run, or nothing was pending)."
+            echo "No artefact registered (dry run, environment none, or nothing was pending)."
             {
               echo "## Submitted to Test Observer"
               echo ""
-              echo "Dry run - no artefact registered."
+              echo "No artefact registered; check the remote run for details."
               echo ""
               echo "- [Remote workflow run](${REMOTE_RUN_URL})"
             } >> "$GITHUB_STEP_SUMMARY"
