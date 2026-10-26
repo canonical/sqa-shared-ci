@@ -1,0 +1,59 @@
+---
+name: Charm integration testing
+on:
+  pull_request:
+    paths:
+      - charm-integration-testing/**
+      - .github/actions/charm_integration_tests/**
+      - .github/workflows/charm-integration-testing.yaml
+  workflow_dispatch:
+    inputs:
+      charm_repo:
+        description: Charm repository to test
+        default: canonical/catalogue-k8s-operator
+      charm_ref:
+        description: Charm repository ref
+        default: main
+      platform:
+        description: kubernetes or machine
+        default: kubernetes
+      runner_args:
+        description: Extra ci_runner arguments
+        default: --plan
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo snap install just --classic
+      - run: just --justfile charm-integration-testing/justfile lint
+      - run: just --justfile charm-integration-testing/justfile check
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.charm_repo || 'canonical/catalogue-k8s-operator' }}
+          ref: ${{ inputs.charm_ref || 'main' }}
+          path: charm
+          persist-credentials: false
+      - id: test
+        uses: ./.github/actions/charm_integration_tests
+        with:
+          charm_path: charm
+          platform: ${{ inputs.platform || 'kubernetes' }}
+          runner_args: ${{ inputs.runner_args || '--plan' }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charm-integration-testing-results
+          path: ${{ steps.test.outputs.results_dir }}
+          if-no-files-found: ignore

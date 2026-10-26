@@ -1,0 +1,25 @@
+---
+name: Charm integration tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: integration
+        uses: canonical/sqa-shared-ci/.github/actions/charm_integration_tests@main
+        with:
+          platform: kubernetes # or: machine
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charm-integration-testing-results
+          path: ${{ steps.integration.outputs.results_dir }}
+          if-no-files-found: warn

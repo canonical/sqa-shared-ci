@@ -1,0 +1,62 @@
+---
+name: Charm Integration Tests
+description: >-
+  Build a charm from source and run the canonical/charm-integration-testing suite
+  against it.
+  A thin wrapper over charm-integration-testing/scripts/ci.sh, which runs on any CI
+  provider.
+inputs:
+  platform:
+    description: Charm substrate, "kubernetes" or "machine"
+    required: true
+  charm_path:
+    description: Directory containing charmcraft.yaml
+    required: false
+    default: .
+  config:
+    description: Scenario configuration file (default charm-integration-testing.json
+      in charm_path, if present)
+    required: false
+    default: ''
+  runner_args:
+    description: Extra ci_runner arguments, whitespace separated (e.g. "--plan")
+    required: false
+    default: ''
+  test_observer_api:
+    description: Optional Test Observer API URL for reporting
+    required: false
+    default: ''
+  test_observer_token:
+    description: Optional Test Observer token for reporting
+    required: false
+    default: ''
+  test_observer_execution_id:
+    description: Optional existing Test Observer execution ID; enables reporting
+    required: false
+    default: ''
+outputs:
+  results_dir:
+    description: Directory containing per-scenario results, JUnit reports, and logs
+    value: ${{ steps.run.outputs.results_dir }}
+runs:
+  using: composite
+  steps:
+    - name: Run charm integration tests
+      id: run
+      shell: bash
+      env:
+        CHARM_PATH: ${{ inputs.charm_path }}
+        PLATFORM: ${{ inputs.platform }}
+        CIT_CONFIG: ${{ inputs.config || env.CIT_CONFIG }}
+        RUNNER_ARGS: ${{ inputs.runner_args }}
+        TEST_OBSERVER_API: ${{ inputs.test_observer_api || env.TEST_OBSERVER_API }}
+        TEST_OBSERVER_TOKEN: ${{ inputs.test_observer_token || env.TEST_OBSERVER_TOKEN }}
+        TEST_OBSERVER_EXECUTION_ID: ${{ inputs.test_observer_execution_id || env.TEST_OBSERVER_EXECUTION_ID }}
+        CIT_OUTPUT_DIR: ${{ env.CIT_OUTPUT_DIR }}
+      run: |-
+        CIT_OUTPUT_DIR="${CIT_OUTPUT_DIR:-$(mktemp -d "${HOME}/charm-integration-testing-results-XXXXXXXX")}"
+        export CIT_OUTPUT_DIR
+        echo "results_dir=${CIT_OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+        read -r -a runner_args <<< "${RUNNER_ARGS}"
+        "${GITHUB_ACTION_PATH}/../../../charm-integration-testing/scripts/ci.sh" \
+          "${CHARM_PATH}" "${PLATFORM}" "${runner_args[@]}"

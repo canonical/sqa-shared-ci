@@ -1,5 +1,7 @@
 # Remote GitHub Workflow Executor
 
+> This repository also provides [Charm Integration Testing](charm-integration-testing/README.md): build a charm and run the charm-integration-testing suite against it on any CI provider.
+
 This repository provides a reusable GitHub Action for a specific gap in GitHub Actions: triggering a workflow in a private repository from a workflow running in a public repository, then waiting for that remote workflow to finish.
 
 The action dispatches a `workflow_dispatch` event to a target repository, discovers the resulting run, polls until completion, and returns the remote run metadata to the caller.

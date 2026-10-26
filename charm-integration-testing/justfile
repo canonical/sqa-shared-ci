@@ -1,0 +1,49 @@
+# Local interface to the charm integration testing scripts. CI should call scripts/ci.sh directly.
+# Run from a charm repository with: just -f <path-to>/charm-integration-testing/justfile <recipe>
+
+set positional-arguments
+set shell := ["bash", "-cu"]
+
+scripts := justfile_directory() / "scripts"
+
+# List recipes
+default:
+    @just --justfile {{ justfile() }} --list
+
+# Write starter configuration (and a GitHub workflow with --github) into a charm repository
+init repo=invocation_directory() *flags="":
+    "{{ scripts }}/init.sh" "{{ repo }}" {{ flags }}
+
+# Install tooling and the pinned integration suite
+install:
+    "{{ scripts }}/install.sh"
+
+# Provision LXD (and Kubernetes) on this disposable host
+provision platform:
+    "{{ scripts }}/provision.sh" "{{ platform }}"
+
+# Pack the charm and print artifact paths
+build source=invocation_directory():
+    "{{ scripts }}/build.sh" "{{ source }}"
+
+# Save the discovered scenarios without deploying anything
+plan charm platform *args:
+    "{{ scripts }}/test.sh" "{{ charm }}" "{{ platform }}" --plan "${@:3}"
+
+# Test a packed charm
+test charm platform *args:
+    "{{ scripts }}/test.sh" "{{ charm }}" "{{ platform }}" "${@:3}"
+
+# Install, provision, build, and test in one step
+ci platform source=invocation_directory() *args:
+    "{{ scripts }}/ci.sh" "{{ source }}" "{{ platform }}" "${@:3}"
+
+# Lint the scripts
+lint:
+    shellcheck --external-sources --source-path=SCRIPTDIR "{{ scripts }}"/*.sh "{{ justfile_directory() }}/tests"/*.sh
+    just --justfile {{ justfile() }} --fmt --check --unstable
+
+# Test build, argument forwarding, failure propagation, and backoff without provisioning a host
+check:
+    bash "{{ justfile_directory() }}/tests/scripts.sh"
+    bash "{{ justfile_directory() }}/tests/scripts.sh" build-failure
