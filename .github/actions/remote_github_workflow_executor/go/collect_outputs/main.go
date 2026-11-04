@@ -289,7 +289,7 @@ func (c *collector) getPage(url string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := c.client.Do(req)
