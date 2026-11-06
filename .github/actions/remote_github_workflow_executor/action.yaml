@@ -26,6 +26,18 @@ inputs:
     description: Arbitrary JSON metadata to pass to the remote workflow's metadata input (merged with auto-collected caller context)
     required: false
     default: '{}'
+  collect_outputs:
+    description: Whether to collect structured outputs returned by the remote workflow
+    required: false
+    default: 'true'
+  outputs_artifact:
+    description: Name of the artifact the remote workflow uploads its outputs JSON in
+    required: false
+    default: workflow-outputs
+  outputs_step_prefix:
+    description: Step-name prefix the remote workflow uses to return outputs JSON inline when it uploads no artifact
+    required: false
+    default: 'outputs::'
 
 outputs:
   run_id:
@@ -37,6 +49,14 @@ outputs:
   conclusion:
     description: Triggered remote workflow conclusion
     value: ${{ steps.return_status.outputs.conclusion }}
+  remote_outputs:
+    description: JSON object of data returned by the remote workflow; '{}' when it returned none
+    # Mapped straight from the collector: routing a payload this size through
+    # an env var can exceed the kernel's per-variable limit.
+    value: ${{ steps.collect_outputs.outputs.remote_outputs || '{}' }}
+  remote_outputs_source:
+    description: Where the outputs came from - artifact, step, or none
+    value: ${{ steps.return_status.outputs.remote_outputs_source }}
 
 runs:
   using: composite
@@ -133,6 +153,31 @@ runs:
           -repo "${TARGET_REPO_NAME}" \
           -run-id "${RUN_ID}"
 
+    # Runs even when the remote failed: partial outputs (a dashboard link, an
+    # execution id) are exactly what a caller needs to triage the failure.
+    - name: Collect remote outputs
+      id: collect_outputs
+      if: always() && inputs.collect_outputs == 'true' && steps.trigger_and_record.outputs.run_id != ''
+      # Collection must never fail the caller; return_status decides from the remote conclusion.
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        TARGET_REPO_OWNER: ${{ inputs.target_repo_owner }}
+        TARGET_REPO_NAME: ${{ inputs.target_repo_name }}
+        RUN_ID: ${{ steps.trigger_and_record.outputs.run_id }}
+        OUTPUTS_ARTIFACT: ${{ inputs.outputs_artifact }}
+        OUTPUTS_STEP_PREFIX: ${{ inputs.outputs_step_prefix }}
+      run: |
+        set -euo pipefail
+        cd "${{ github.action_path }}/go/collect_outputs"
+        go run . \
+          -owner "${TARGET_REPO_OWNER}" \
+          -repo "${TARGET_REPO_NAME}" \
+          -run-id "${RUN_ID}" \
+          -artifact "${OUTPUTS_ARTIFACT}" \
+          -step-prefix "${OUTPUTS_STEP_PREFIX}"
+
     - name: Completion summary
       id: completion_summary
       if: always()
@@ -144,6 +189,7 @@ runs:
         RUN_ID: ${{ steps.trigger_and_record.outputs.run_id }}
         RUN_URL: ${{ steps.monitor_run.outputs.run_url }}
         CONCLUSION: ${{ steps.monitor_run.outputs.conclusion }}
+        REMOTE_OUTPUTS_SOURCE: ${{ steps.collect_outputs.outputs.remote_outputs_source }}
       run: |
         cat << EOF
         ------------------------------------------------------------------------
@@ -162,6 +208,9 @@ runs:
           Remote URL: ${RUN_URL}
           Conclusion: ${CONCLUSION}
 
+        REMOTE OUTPUTS:
+          Source: ${REMOTE_OUTPUTS_SOURCE:-not collected}
+
         COMPLETION TIMESTAMP:
           $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
@@ -177,12 +226,14 @@ runs:
         RUN_URL: ${{ steps.monitor_run.outputs.run_url }}
         CONCLUSION: ${{ steps.monitor_run.outputs.conclusion }}
         MONITOR_OUTCOME: ${{ steps.monitor_run.outcome }}
+        REMOTE_OUTPUTS_SOURCE: ${{ steps.collect_outputs.outputs.remote_outputs_source }}
       run: |
         set -euo pipefail
 
         echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
         echo "run_url=${RUN_URL}" >> "${GITHUB_OUTPUT}"
         echo "conclusion=${CONCLUSION}" >> "${GITHUB_OUTPUT}"
+        echo "remote_outputs_source=${REMOTE_OUTPUTS_SOURCE:-none}" >> "${GITHUB_OUTPUT}"
 
         if [ "${MONITOR_OUTCOME}" = "failure" ]; then
           echo "ERROR: Monitor step failed"
