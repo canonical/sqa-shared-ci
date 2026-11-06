@@ -116,13 +116,7 @@ jobs:
           target_repo_owner: canonical
           target_repo_name: terragrunt-deployment-pipelines
           target_workflow: submit-manifest.yaml
-          # Points at the branch of canonical/terragrunt-deployment-pipelines#281
-          # until it merges: the outputs.json artifact this sample reads back
-          # only exists there, so dispatching main would yield no outputs.
-          # Resolving the workflow by filename still goes through the default
-          # branch, so submit-manifest.yaml must exist on main either way.
-          # TODO: revert to `main` once #281 lands.
-          target_ref: return-id-on-manifest-submission
+          target_ref: main
 
           # workflow_dispatch inputs are strings on the wire, so the manifest
           # travels as a JSON-encoded string. toJSON() does the quoting and
